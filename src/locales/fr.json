@@ -1,0 +1,11 @@
+{
+  "welcome": "Bienvenue",
+  "description": "Ceci est un exemple français",
+  "notFound": {
+    "title": "Page Introuvable",
+    "description": "Désolé, nous n'avons pas pu trouver la page que vous recherchez. Elle a peut-être été déplacée, supprimée, ou vous avez saisi une URL incorrecte.",
+    "backHome": "Retour à l'Accueil",
+    "browseProducts": "Parcourir les Produits",
+    "helpText": "Si vous pensez qu'il s'agit d'une erreur, veuillez contacter notre équipe de support."
+  }
+}

@@ -1,0 +1,42 @@
+trigger:
+- AE-dev
+
+resources:
+- repo: self
+
+variables:
+  imageName: 'cables-frontend-dev'
+
+pool:
+  name: 'develop-server'
+
+stages:
+
+  - stage: Build
+    displayName: Build image
+    jobs:
+      - job: Build
+        displayName: Build
+        steps: 
+          - checkout: self
+            path: $(imageName)
+          - script: |
+              cd $(Build.SourcesDirectory)
+              sudo mv .env.example .env
+              sudo docker build -t $(imageName) -f Dockerfile .
+
+
+  - stage: Deploy
+    displayName: Deploy image
+    jobs:
+      - deployment: Deploy  
+        displayName: Deploy
+        environment: development  
+        strategy:
+          runOnce:
+            deploy:
+              steps: 
+                - script: |
+                    sudo docker rm -f $(imageName) || true
+                    sudo docker run --name $(imageName) --network xyris_network -d   --restart=unless-stopped $(imageName)
+

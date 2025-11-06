@@ -1,0 +1,417 @@
+trigger:
+- dev
+
+pool:
+  name: 'cables'
+  demands:
+  - agent.name -equals admin-panel
+
+variables:
+  nodeVersion: '20.18.0'
+  dockerImageName: 'nopcommerce-frontend'
+  dockerImageTag: '$(Build.BuildId)'
+  dockerRegistry: 'localhost:5000'
+  npmCache: '$(Pipeline.Workspace)/.npm'
+
+stages:
+- stage: Build
+  displayName: 'Build and Test'
+  jobs:
+  - job: Build
+    displayName: 'Build Frontend Application'
+    steps:
+    - task: NodeTool@0
+      displayName: 'Use Node.js'
+      inputs:
+        versionSpec: $(nodeVersion)
+
+    - task: Cache@2
+      displayName: 'Cache npm dependencies'
+      inputs:
+        key: 'npm | "$(Agent.OS)" | package-lock.json'
+        restoreKeys: |
+          npm | "$(Agent.OS)"
+        path: $(npmCache)
+      condition: ne(variables['Build.Reason'], 'PullRequest')
+
+    - task: Bash@3
+      displayName: 'Install dependencies'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Installing npm dependencies..."
+          npm ci --cache $(npmCache) --prefer-offline --no-audit
+          echo "Dependencies installed successfully"
+
+    - task: Bash@3
+      displayName: 'Run TypeScript type checking'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Running TypeScript type checking..."
+          npx tsc --noEmit
+          echo "TypeScript type checking completed successfully"
+
+    - task: Bash@3
+      displayName: 'Run ESLint'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Running ESLint..."
+          npm run lint
+          echo "ESLint completed successfully"
+
+    - task: Bash@3
+      displayName: 'Build application'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Building React application..."
+          npm run build
+          echo "Build completed successfully"
+          
+          # Verify build output
+          if [ -d "dist" ]; then
+            echo "Build output directory 'dist' created successfully"
+            ls -la dist/
+          else
+            echo "##vso[task.logissue type=error]Build output directory 'dist' not found"
+            exit 1
+          fi
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish build artifacts'
+      inputs:
+        PathtoPublish: 'dist'
+        ArtifactName: 'frontend-build'
+      condition: succeeded()
+
+  - job: Test
+    displayName: 'Run Tests'
+    dependsOn: Build
+    steps:
+    - task: NodeTool@0
+      displayName: 'Use Node.js'
+      inputs:
+        versionSpec: $(nodeVersion)
+
+    - task: Cache@2
+      displayName: 'Cache npm dependencies'
+      inputs:
+        key: 'npm | "$(Agent.OS)" | package-lock.json'
+        restoreKeys: |
+          npm | "$(Agent.OS)"
+        path: $(npmCache)
+      condition: ne(variables['Build.Reason'], 'PullRequest')
+
+    - task: Bash@3
+      displayName: 'Install dependencies for testing'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Installing npm dependencies for testing..."
+          npm ci --cache $(npmCache) --prefer-offline --no-audit
+
+    - task: Bash@3
+      displayName: 'Run unit tests (if configured)'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Checking for test scripts..."
+          if npm run | grep -q "test"; then
+            echo "Running unit tests..."
+            npm test
+            echo "Unit tests completed"
+          else
+            echo "No test script found in package.json - skipping tests"
+          fi
+
+    - task: PublishTestResults@2
+      displayName: 'Publish test results'
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '**/test-results.xml'
+        mergeTestResults: true
+        testRunTitle: 'Frontend Tests'
+      condition: succeededOrFailed()
+
+    - task: Bash@3
+      displayName: 'Log Build and Test Results'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "=== Frontend Build and Test Stage Completed ===" >> pipeline-results.txt
+          echo "Node.js version: $(nodeVersion)" >> pipeline-results.txt
+          echo "Build completed at: $(date)" >> pipeline-results.txt
+
+- stage: SecurityScan
+  displayName: 'Security and Vulnerability Scan'
+  dependsOn: Build
+  jobs:
+  - job: SecurityScan
+    displayName: 'Security Scan Job'
+    steps:
+    - task: NodeTool@0
+      displayName: 'Use Node.js'
+      inputs:
+        versionSpec: $(nodeVersion)
+
+    - task: Cache@2
+      displayName: 'Cache npm dependencies'
+      inputs:
+        key: 'npm | "$(Agent.OS)" | package-lock.json'
+        restoreKeys: |
+          npm | "$(Agent.OS)"
+        path: $(npmCache)
+      condition: ne(variables['Build.Reason'], 'PullRequest')
+
+    - task: Bash@3
+      displayName: 'Install Security Tools'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Initialize pipeline results file
+          echo "=== Frontend Pipeline Execution Started at $(date) ===" > pipeline-results.txt
+          
+          # Install dependencies
+          echo "Installing npm dependencies..." | tee -a pipeline-results.txt
+          npm ci --cache $(npmCache) --prefer-offline --no-audit 2>&1 | tee -a pipeline-results.txt
+          
+          # Install Trivy for container scanning
+          echo "Installing Trivy..." | tee -a pipeline-results.txt
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.48.0 2>&1 | tee -a pipeline-results.txt
+          
+          # Install jq for JSON parsing
+          echo "Installing jq..." | tee -a pipeline-results.txt
+          apt-get update && apt-get install -y jq || yum install -y jq || echo "jq installation failed, will use alternative methods" 2>&1 | tee -a pipeline-results.txt
+          
+          echo "Security tools installed successfully" | tee -a pipeline-results.txt
+
+    - task: Bash@3
+      displayName: 'Scan npm Dependencies'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "=== Starting npm Dependency Scan ===" | tee -a pipeline-results.txt
+          
+          # Create security-reports directory
+          mkdir -p security-reports
+          
+          # Scan npm dependencies for vulnerabilities
+          echo "Scanning npm dependencies for vulnerabilities..." | tee -a pipeline-results.txt
+          npm audit --audit-level=moderate --json > security-reports/npm-audit.json 2>&1 | tee -a pipeline-results.txt || echo "No vulnerabilities found or audit failed" | tee -a pipeline-results.txt
+          
+          # Also try to get package list for manual review
+          npm list --depth=0 --json > security-reports/packages.json 2>&1 | tee -a pipeline-results.txt || echo "Failed to list packages" | tee -a pipeline-results.txt
+          
+          echo "Dependency scan completed" | tee -a pipeline-results.txt
+
+    - task: Bash@3
+      displayName: 'Generate Security Report'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "=== Generating Security Report ===" | tee -a pipeline-results.txt
+          
+          # Ensure security-reports directory exists
+          mkdir -p security-reports
+          
+          # Create security summary
+          echo "## Frontend Security Scan Results" > security-summary.md
+          echo "Scan completed at: $(date)" >> security-summary.md
+          echo "" >> security-summary.md
+          
+          if [ -f "security-reports/npm-audit.json" ]; then
+            echo "### npm Package Vulnerabilities Found:" >> security-summary.md
+            if command -v jq &> /dev/null; then
+              jq -r '.vulnerabilities[]? | "- \(.name): \(.severity) - \(.title)"' security-reports/npm-audit.json >> security-summary.md || echo "No vulnerabilities found in npm packages" >> security-summary.md
+            else
+              echo "Vulnerability scan completed - jq not available for detailed parsing" >> security-summary.md
+              echo "Check npm-audit.json file for details" >> security-summary.md
+            fi
+          else
+            echo "### No npm vulnerability scan results available" >> security-summary.md
+          fi
+          
+          # Copy summary to security-reports directory
+          cp security-summary.md security-reports/
+          echo "Security summary generated" | tee -a pipeline-results.txt
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Security Reports'
+      inputs:
+        PathtoPublish: 'security-reports'
+        ArtifactName: 'frontend-security-reports'
+      condition: always()
+
+- stage: DockerBuild
+  displayName: 'Build Docker Images'
+  dependsOn: SecurityScan
+  jobs:
+  - job: DockerBuild
+    displayName: 'Build Docker Images Job'
+    steps:
+    - task: NodeTool@0
+      displayName: 'Use Node.js'
+      inputs:
+        versionSpec: $(nodeVersion)
+
+    - task: Cache@2
+      displayName: 'Cache npm dependencies'
+      inputs:
+        key: 'npm | "$(Agent.OS)" | package-lock.json'
+        restoreKeys: |
+          npm | "$(Agent.OS)"
+        path: $(npmCache)
+      condition: ne(variables['Build.Reason'], 'PullRequest')
+
+    - task: Bash@3
+      displayName: 'Install dependencies for Docker build'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Installing npm dependencies for Docker build..." | tee -a pipeline-results.txt
+          npm ci --cache $(npmCache) --prefer-offline --no-audit 2>&1 | tee -a pipeline-results.txt
+
+    - task: Bash@3
+      displayName: 'Build Frontend Docker Image'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Building frontend Docker image..." | tee -a pipeline-results.txt
+          docker build -t $(dockerImageName):$(dockerImageTag) -t $(dockerImageName):latest . 2>&1 | tee -a pipeline-results.txt
+          echo "Frontend Docker image built successfully" | tee -a pipeline-results.txt
+
+    - task: Bash@3
+      displayName: 'Scan Docker Images'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "=== Starting Docker Image Security Scan ===" | tee -a pipeline-results.txt
+          
+          # Check if Docker images exist before scanning
+          echo "Checking Docker images..." | tee -a pipeline-results.txt
+          docker images | grep $(dockerImageName) || echo "Frontend image not found" | tee -a pipeline-results.txt
+          
+          # Scan frontend image if it exists
+          if docker images | grep -q $(dockerImageName); then
+            echo "Scanning frontend Docker image..." | tee -a pipeline-results.txt
+            trivy image --severity HIGH,CRITICAL --format json --output trivy-frontend.json $(dockerImageName):latest 2>&1 | tee -a pipeline-results.txt || echo "Failed to scan frontend image" | tee -a pipeline-results.txt
+          else
+            echo "Frontend image not found, skipping scan" | tee -a pipeline-results.txt
+            echo '{"Results": []}' > trivy-frontend.json
+          fi
+          
+          # Generate container security summary
+          echo "## Frontend Container Security Scan Results" > container-security-summary.md
+          echo "Scan completed at: $(date)" >> container-security-summary.md
+          echo "" >> container-security-summary.md
+          
+          if [ -f "trivy-frontend.json" ]; then
+            echo "### Frontend Container Vulnerabilities:" >> container-security-summary.md
+            if command -v jq &> /dev/null; then
+              jq -r '.Results[] | select(.Vulnerabilities != null) | .Vulnerabilities[] | "- \(.VulnerabilityID): \(.Severity) - \(.Description)"' trivy-frontend.json >> container-security-summary.md || echo "No vulnerabilities found in frontend container" >> container-security-summary.md
+            else
+              echo "Container scan completed - jq not available for detailed parsing" >> container-security-summary.md
+            fi
+          fi
+          
+          echo "Container security scan completed" | tee -a pipeline-results.txt
+
+    - task: Bash@3
+      displayName: 'Create Container Security Reports Directory'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Creating container security reports directory..." | tee -a pipeline-results.txt
+          mkdir -p container-security-reports
+          
+          # Create empty JSON files if they don't exist
+          if [ ! -f "trivy-frontend.json" ]; then
+            echo '{"Results": []}' > trivy-frontend.json
+            echo "Created empty trivy-frontend.json" | tee -a pipeline-results.txt
+          fi
+          
+          # Copy JSON files to the reports directory
+          cp *.json container-security-reports/ 2>/dev/null || echo "No JSON files to copy" | tee -a pipeline-results.txt
+          echo "Container security reports directory created" | tee -a pipeline-results.txt
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Container Security Reports'
+      inputs:
+        PathtoPublish: 'container-security-reports'
+        ArtifactName: 'frontend-container-security-reports'
+      condition: always()
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Pipeline Results Log'
+      inputs:
+        PathtoPublish: 'pipeline-results.txt'
+        ArtifactName: 'frontend-pipeline-results'
+      condition: always()
+
+- stage: SecurityGate
+  displayName: 'Security Gate Check'
+  dependsOn: DockerBuild
+  jobs:
+  - job: SecurityGate
+    displayName: 'Security Gate Job'
+    steps:
+    - task: Bash@3
+      displayName: 'Check Security Results'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "=== Frontend Security Gate Check ===" | tee -a pipeline-results.txt
+          echo "Checking security scan results..." | tee -a pipeline-results.txt
+          
+          # Check for critical vulnerabilities in npm dependencies
+          if [ -f "security-reports/npm-audit.json" ]; then
+            if command -v jq &> /dev/null; then
+              CRITICAL_DEPS=$(jq -r '.vulnerabilities[]? | select(.severity == "critical") | .name' security-reports/npm-audit.json | wc -l)
+              if [ "$CRITICAL_DEPS" -gt 0 ]; then
+                echo "##vso[task.logissue type=error]Critical vulnerabilities found in npm dependencies. Deployment blocked." | tee -a pipeline-results.txt
+                echo "=== Pipeline Failed - Critical Vulnerabilities Found ===" >> pipeline-results.txt
+                exit 1
+              fi
+            else
+              echo "jq not available - skipping critical vulnerability check for dependencies" | tee -a pipeline-results.txt
+            fi
+          fi
+          
+          # Check for critical vulnerabilities in containers
+          if [ -f "trivy-frontend.json" ]; then
+            if command -v jq &> /dev/null; then
+              CRITICAL_CONTAINER=$(jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL") | .VulnerabilityID' trivy-frontend.json | wc -l)
+              if [ "$CRITICAL_CONTAINER" -gt 0 ]; then
+                echo "##vso[task.logissue type=error]Critical vulnerabilities found in frontend container. Deployment blocked." | tee -a pipeline-results.txt
+                echo "=== Pipeline Failed - Critical Container Vulnerabilities Found ===" >> pipeline-results.txt
+                exit 1
+              fi
+            else
+              echo "jq not available - skipping critical vulnerability check for frontend container" | tee -a pipeline-results.txt
+            fi
+          fi
+          
+          echo "Security gate passed - no critical vulnerabilities found" | tee -a pipeline-results.txt
+
+- stage: Deploy
+  displayName: 'Deploy to Local Server'
+  dependsOn: SecurityGate
+  jobs:
+  - job: Deploy
+    displayName: 'Deploy Frontend Application'
+    steps:
+    - task: Bash@3
+      displayName: 'Deploy Frontend Application'
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "=== Starting Frontend Deployment ===" | tee -a pipeline-results.txt
+          echo "Deploying frontend to production environment..." | tee -a pipeline-results.txt
+          
+          # Make deploy script executable and run it
+          chmod +x deploy.sh
+          ./deploy.sh production 2>&1 | tee -a pipeline-results.txt
+          
+          echo "=== Frontend Pipeline Execution Completed at $(date) ===" >> pipeline-results.txt

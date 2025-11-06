@@ -1,0 +1,42 @@
+trigger:
+- production
+
+resources:
+- repo: self
+
+variables:
+  imageName: 'elsewedy-cables-front'
+
+pool:
+  name: elsewedy-server
+
+stages:
+  - stage: Build
+    displayName: Build image
+    jobs:
+      - job: Build
+        displayName: Build
+        steps: 
+          - checkout: self
+            path: $(imageName)
+          - script: |
+              cd $(Build.SourcesDirectory)
+              sudo mv .env.prod .env
+              sudo docker build -t $(imageName) -f Dockerfile .
+
+  - stage: Deploy
+    displayName: Deploy image
+    jobs:
+      - deployment: Deploy  
+        displayName: Deploy
+        environment: prod  
+        strategy:
+          runOnce:
+            deploy:
+              steps: 
+                - script: |
+                    sudo docker rm -f $(imageName) || true
+                    sudo docker image prune -f || true
+                    sudo docker run --name $(imageName)  -p 3000:80 -d  --restart=unless-stopped $(imageName)
+
+
